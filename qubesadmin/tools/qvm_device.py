@@ -26,6 +26,7 @@
 import argparse
 import os
 import sys
+import re
 
 import qubesadmin
 import qubesadmin.exc
@@ -124,33 +125,71 @@ def list_devices(args):
 
     qubesadmin.tools.print_table(prepare_table(result.values()))
 
+def get_devices_by_pattern(app, devclass, pattern=None, index=None, device_assignment=None):
+    devices = set()
+
+    # Gather available devices
+    for domain in app.domains:
+        try:
+            for dev in domain.devices[devclass].available():
+                devices.add(dev)
+        except qubesadmin.exc.QubesDaemonAccessError:
+            continue
+
+    if pattern:
+        devices = [dev for dev in devices if re.match(pattern, dev.description)]
+        if index is not None:
+            try:
+                device = devices[index]
+            except IndexError:
+                raise qubesadmin.exc.QubesException("No device found for the given index.")
+        else:
+            if len(devices) == 0:
+                raise qubesadmin.exc.QubesException("No device matches the given pattern.")
+            elif len(devices) > 1:
+                raise qubesadmin.exc.QubesException("Multiple devices match the given pattern, please provide an index.")
+            else:
+                device = devices[0]
+    elif device_assignment:
+        # This handles cases where a specific device is directly assigned
+        device = device_assignment
+    else:
+        raise qubesadmin.exc.QubesException("Pattern or device assignment is required.")
+
+    return device
 
 def attach_device(args):
     """ Called by the parser to execute the :program:`qvm-devices attach`
         subcommand.
     """
-    device_assignment = args.device_assignment
+    app = args.app
+    devclass = args.devclass
+    device = get_devices_by_pattern(app, devclass, args.pattern, args.index, args.device_assignment)
+
+    device_assignment = qubesadmin.devices.DeviceAssignment(
+            device.backend_domain, device.ident)
+
     vm = args.domains[0]
     options = dict(opt.split('=', 1) for opt in args.option or [])
     if args.ro:
         options['read-only'] = 'yes'
     device_assignment.persistent = args.persistent
     device_assignment.options = options
-    vm.devices[args.devclass].attach(device_assignment)
-
+    vm.devices[devclass].attach(device_assignment)
 
 def detach_device(args):
     """ Called by the parser to execute the :program:`qvm-devices detach`
         subcommand.
     """
+    app = args.app
+    devclass = args.devclass
+    device = get_devices_by_pattern(app, devclass, args.pattern, args.index, args.device_assignment)
+
+    device_assignment = qubesadmin.devices.DeviceAssignment(
+            device.backend_domain, device.ident)
+
     vm = args.domains[0]
-    if args.device_assignment:
-        vm.devices[args.devclass].detach(args.device_assignment)
-    else:
-        for device_assignment in vm.devices[args.devclass].assignments():
-            vm.devices[args.devclass].detach(device_assignment)
-
-
+    vm.devices[devclass].detach(device_assignment)
 def init_list_parser(sub_parsers):
     """ Configures the parser for the :program:`qvm-devices list` subcommand """
     # pylint: disable=protected-access
@@ -162,7 +201,6 @@ def init_list_parser(sub_parsers):
         help='list devices assigned to specific domain(s)')
     list_parser._mutually_exclusive_groups.append(vm_name_group)
     list_parser.set_defaults(func=list_devices)
-
 
 class DeviceAction(qubesadmin.tools.QubesAction):
     """ Action for argument parser that gets the
@@ -250,6 +288,7 @@ def get_parser(device_class=None):
 
     attach_parser.add_argument(metavar='BACKEND:DEVICE_ID',
                                dest='device_assignment',
+                               nargs=argparse.OPTIONAL,
                                action=DeviceAction)
     detach_parser.add_argument(metavar='BACKEND:DEVICE_ID',
                                dest='device_assignment',
@@ -270,6 +309,12 @@ def get_parser(device_class=None):
                                help="Attach device persistently (so it will "
                                     "be automatically "
                                     "attached at qube startup)")
+
+    attach_parser.add_argument('-m', '--match', dest='pattern', default=None, help="Pattern to match device")
+    attach_parser.add_argument('-i', '--index', dest='index', type=int, default=None, help="Index of the matched device")
+
+    detach_parser.add_argument('-m', '--match', dest='pattern', default=None, help="Pattern to match device")
+    detach_parser.add_argument('-i', '--index', dest='index', type=int, default=None, help="Index of the matched device")
 
     attach_parser.set_defaults(func=attach_device)
     detach_parser.set_defaults(func=detach_device)
